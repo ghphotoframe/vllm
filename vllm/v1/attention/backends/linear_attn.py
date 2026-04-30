@@ -47,7 +47,7 @@ class LinearAttentionMetadata:
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
     reorder_batch_threshold: int = 1
 
-    _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
