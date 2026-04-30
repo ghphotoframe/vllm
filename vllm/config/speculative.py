@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "bailing_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -356,6 +357,17 @@ class SpeculativeConfig:
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
+
+        if hf_config.model_type == "bailing_hybrid":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            if n_predict is not None and n_predict > 0:
+                hf_config.model_type = "bailing_mtp"
+                hf_config.update(
+                    {
+                        "n_predict": n_predict,
+                        "architectures": ["BailingMoeV2_5MTPModel"],
+                    }
+                )
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
