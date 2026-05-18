@@ -487,7 +487,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         v = self.v_proj(hidden_states)[0]
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         g1 = self.f_proj(hidden_states)[0]
-        g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
+        g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias, lower_bound=self.lower_bound if self.safe_gate else None)
         g1 = g1.unsqueeze(0)
         g2 = rearrange(self.g_proj(hidden_states)[0], "... (h d) -> ... h d", d=self.head_dim)
 
