@@ -168,6 +168,13 @@ class BailingMoeV3MLAAttention(nn.Module):
             self.fused_qkv_a_proj = None
             self.q_a_layernorm = None
             self.q_b_proj = None
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
+                self.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            )
         else:
             from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 
@@ -188,14 +195,8 @@ class BailingMoeV3MLAAttention(nn.Module):
                 prefix=f"{prefix}.q_b_proj",
             )
             self.q_proj = None
+            self.kv_a_proj_with_mqa = None
 
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-        )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
@@ -979,6 +980,8 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         stacked_mappings = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".fused_qkv_a_proj", ".q_a_proj", 0),
+            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
         expert_mappings = list(self.get_expert_mapping())
 
