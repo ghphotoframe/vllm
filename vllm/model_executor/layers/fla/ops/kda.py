@@ -1078,7 +1078,7 @@ def chunk_gla_fwd_kernel_o(
             h + (i_tg * H + i_h) * K * V,
             (V, K),
             (K, 1),
-            (i_k * BK, i_v * BV),
+            (i_v * BV, i_k * BK),
             (BV, BK),
             (1, 0),
         )

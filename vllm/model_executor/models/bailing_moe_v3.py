@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -51,7 +52,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mla import MLAAttention
+from vllm.model_executor.layers.mla import (
+    MLAModules,
+    MultiHeadLatentAttentionWrapper,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -120,6 +124,15 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
     return rope_parameters or None
 
 
+def _get_layer_swiglu_limit(limit_list: list | None, layer_idx: int) -> float | None:
+    if limit_list is None or layer_idx >= len(limit_list):
+        return None
+    limit = limit_list[layer_idx]
+    if limit in (None, 0):
+        return None
+    return float(limit)
+
+
 def _load_a_log(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
     tp_rank = get_tensor_model_parallel_rank()
     tp_size = get_tensor_model_parallel_world_size()
@@ -176,8 +189,6 @@ class BailingMoeV3MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
         else:
-            from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -239,93 +250,41 @@ class BailingMoeV3MLAAttention(nn.Module):
             is_neox_style=False,
             rope_parameters=_build_rope_parameters(config),
         )
-        self.mla_attn = MLAAttention(
-            num_heads=self.num_local_heads,
-            scale=self.scaling,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+        mla_modules = MLAModules(
+            kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj,
-            q_b_proj=self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            q_a_layernorm=self.q_a_layernorm,
-            fused_qkv_a_proj=self.fused_qkv_a_proj,
             o_proj=self.dense,
+            fused_qkv_a_proj=self.fused_qkv_a_proj,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+            q_a_layernorm=self.q_a_layernorm,
+            q_b_proj=self.q_b_proj,
+            q_proj=self.q_proj,
+            indexer=None,
+            is_sparse=False,
+            topk_indices_buffer=None,
             g_proj=self.g_proj,
             gated_attention_proj_granularity_type=(
                 self.gated_attention_proj_granularity_type
             ),
         )
-        self.prefix = prefix
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-        original_process_weights = self.mla_attn.process_weights_after_loading
-
-        def wrapped_process_weights(act_dtype: torch.dtype) -> None:
-            original_process_weights(act_dtype)
-            if self.mla_attn.attn_backend.get_name() == "ASCEND_MLA":
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
-
-        self.mla_attn.process_weights_after_loading = wrapped_process_weights
+        self.mla_attn = MultiHeadLatentAttentionWrapper(
+            self.hidden_size,
+            self.num_local_heads,
+            self.scaling,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            mla_modules,
+            cache_config,
+            quant_config,
+            prefix,
+        )
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
-        if self.mla_attn.attn_backend.get_name() == "ASCEND_MLA":
-            output = torch.empty_like(hidden_states)
-            torch.ops.vllm.mla_forward(hidden_states, False, output, self.prefix)
-            return output
-
-        if self.q_lora_rank is not None:
-            assert self.fused_qkv_a_proj is not None
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_lora = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            assert self.q_a_layernorm is not None
-            assert self.q_b_proj is not None
-            q = self.q_b_proj(self.q_a_layernorm(q_c))[0]
-        else:
-            assert self.q_proj is not None
-            q = self.q_proj(hidden_states)[0]
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c = self.kv_a_layernorm(kv_c)
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        k_pe = k_pe.unsqueeze(1)
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
-        attn_out = self.mla_attn(
-            q,
-            kv_c,
-            k_pe,
-            output_shape=(
-                hidden_states.shape[0],
-                self.num_local_heads * self.v_head_dim,
-            ),
-        )
-        if self.g_proj is not None:
-            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
-                hidden_states.dtype
-            )
-            if self.gated_attention_proj_granularity_type == "head_wise":
-                attn_out = attn_out.view(-1, self.num_local_heads, self.v_head_dim)
-                attn_out = attn_out * gate.unsqueeze(-1)
-                attn_out = attn_out.reshape(hidden_states.shape[0], -1)
-            else:
-                attn_out = attn_out * gate
-        return self.dense(attn_out)[0]
+        return self.mla_attn(positions, hidden_states)
 
 
 # --8<-- [start:bailing_moe_v3_kimi_delta_attention]
@@ -675,6 +634,7 @@ class BailingMoeV3MoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        layer_id: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -684,6 +644,13 @@ class BailingMoeV3MoE(nn.Module):
         self.hidden_size = config.hidden_size
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.gate = BailingMoeV3Gate(config)
+        self.expert_swiglu_limit = _get_layer_swiglu_limit(
+            getattr(config, "expert_swiglu_limit_list", None), layer_id
+        )
+        self.share_expert_swiglu_limit = _get_layer_swiglu_limit(
+            getattr(config, "share_expert_swiglu_limit_list", None), layer_id
+        )
+        activation = "swiglustep" if self.expert_swiglu_limit is not None else "silu"
         shared_intermediate = (
             config.moe_shared_expert_intermediate_size * config.num_shared_experts
         )
@@ -693,6 +660,7 @@ class BailingMoeV3MoE(nn.Module):
             quant_config=quant_config,
             reduce_results=False,
             prefix=f"{prefix}.shared_experts",
+            swiglu_limit=self.share_expert_swiglu_limit,
         )
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
@@ -703,6 +671,8 @@ class BailingMoeV3MoE(nn.Module):
             reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
+            activation=activation,
+            activation_limit=self.expert_swiglu_limit,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.expert_bias,
@@ -715,9 +685,7 @@ class BailingMoeV3MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
-        router_logits = self.gate(hidden_states.to(torch.float32)).to(
-            hidden_states.dtype
-        )
+        router_logits = self.gate(hidden_states.to(torch.float32))
         shared_output, hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
@@ -765,7 +733,10 @@ class BailingMoeV3DecoderLayer(nn.Module):
 
         if config.num_experts is not None and layer_id >= config.first_k_dense_replace:
             self.mlp = BailingMoeV3MoE(
-                config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config,
+                quant_config=quant_config,
+                layer_id=layer_id,
+                prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = BailingMLP(

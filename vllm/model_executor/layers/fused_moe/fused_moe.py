@@ -1614,6 +1614,7 @@ def fused_experts(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
+    activation_limit: float | None = None,
 ) -> torch.Tensor:
     """Run fused MoE expert computation using Triton kernels."""
     if quant_config is None:
@@ -1628,6 +1629,7 @@ def fused_experts(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         activation=activation.value,
+        activation_limit=activation_limit,
         apply_router_weight_on_input=apply_router_weight_on_input,
         use_fp8_w8a8=quant_config.use_fp8_w8a8,
         use_int8_w8a8=quant_config.use_int8_w8a8,
@@ -1687,6 +1689,7 @@ def fused_experts_impl(
     topk_ids: torch.Tensor,
     inplace: bool,
     activation: str = "silu",
+    activation_limit: float | None = None,
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
@@ -1841,7 +1844,10 @@ def fused_experts_impl(
     )
 
     apply_moe_activation(
-        activation_enum, intermediate_cache2, intermediate_cache1.view(-1, N)
+        activation_enum,
+        intermediate_cache2,
+        intermediate_cache1.view(-1, N),
+        limit=activation_limit,
     )
 
     qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(

@@ -883,7 +883,9 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def activation(
         self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation, output, input, limit=self.moe_config.activation_limit
+        )
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
@@ -1369,6 +1371,7 @@ class FusedMoEKernelModularImpl:
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+
         if self.inplace:
             assert self.shared_experts is None
             assert not disable_inplace()

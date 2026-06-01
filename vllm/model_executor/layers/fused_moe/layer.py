@@ -272,6 +272,7 @@ class FusedMoE(PluggableLayer):
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        activation_limit: float | None = None,
         is_act_and_mul: bool = True,
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
@@ -509,6 +510,7 @@ class FusedMoE(PluggableLayer):
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
+			activation_limit=activation_limit,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (

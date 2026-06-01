@@ -1257,6 +1257,9 @@ class FusedMoEConfig:
     # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
+    # Optional activation clamp limit for SwiGLU variants.
+    activation_limit: float | None = None
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(

@@ -39,7 +39,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -183,6 +183,7 @@ class BailingMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool | None = True,
         prefix: str = "",
+        swiglu_limit: float | None = None,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -200,7 +201,11 @@ class BailingMLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-        self.act_fn = SiluAndMul()
+        self.act_fn = (
+            SwigluStepAndMul(limit=swiglu_limit)
+            if swiglu_limit not in (None, 0)
+            else SiluAndMul()
+        )
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
