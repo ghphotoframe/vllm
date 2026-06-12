@@ -33,7 +33,7 @@ from vllm.model_executor.layers.fla.ops.kda import (
     fused_kda_gate,
     fused_recurrent_kda,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -662,19 +662,19 @@ class BailingMoeV3MoE(nn.Module):
             prefix=f"{prefix}.shared_experts",
             swiglu_limit=self.share_expert_swiglu_limit,
         )
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
             activation=activation,
             activation_limit=self.expert_swiglu_limit,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.expert_bias,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -686,14 +686,9 @@ class BailingMoeV3MoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
         router_logits = self.gate(hidden_states.to(torch.float32))
-        shared_output, hidden_states = self.experts(
+        hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        hidden_states = hidden_states * self.routed_scaling_factor + shared_output
-        if self.tp_size > 1:
-            hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                hidden_states
-            )
         return hidden_states.view(num_tokens, hidden_size)
 
 
