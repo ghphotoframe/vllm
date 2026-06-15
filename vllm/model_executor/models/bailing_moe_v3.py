@@ -341,26 +341,13 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             raise ValueError("BailingMoeV3 KDA currently expects no_kda_lora=True")
 
         projection_size = self.head_dim * self.num_heads
-        self.q_proj = ColumnParallelLinear(
+        self.projection_size_per_partition = projection_size // self.tp_size
+        self.qkvb_proj = MergedColumnParallelLinear(
             self.hidden_size,
-            projection_size,
+            [projection_size, projection_size, projection_size, self.num_heads],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = ColumnParallelLinear(
-            self.hidden_size,
-            projection_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = ColumnParallelLinear(
-            self.hidden_size,
-            projection_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
+            prefix=f"{prefix}.qkvb_proj",
         )
         self.f_proj = ColumnParallelLinear(
             self.hidden_size,
@@ -373,13 +360,6 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             torch.empty(projection_size // self.tp_size, dtype=torch.float32)
         )
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-        self.b_proj = ColumnParallelLinear(
-            self.hidden_size,
-            self.num_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.b_proj",
-        )
 
         self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
@@ -442,10 +422,17 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
     ) -> None:
         del positions
         num_tokens = hidden_states.size(0)
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
-        beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
+        qkvb = self.qkvb_proj(hidden_states)[0]
+        q, k, v, beta_logits = qkvb.split(
+            [
+                self.projection_size_per_partition,
+                self.projection_size_per_partition,
+                self.projection_size_per_partition,
+                self.local_num_heads,
+            ],
+            dim=-1,
+        )
+        beta = beta_logits.float().sigmoid().unsqueeze(0)
         g1 = self.f_proj(hidden_states)[0]
         g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias, lower_bound=self.lower_bound if self.safe_gate else None)
         g1 = g1.unsqueeze(0)
@@ -867,6 +854,7 @@ class BailingMoeV3Model(nn.Module):
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkvb_proj": ["q_proj", "k_proj", "v_proj", "b_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -946,6 +934,10 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         stacked_mappings = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".qkvb_proj", ".q_proj", 0),
+            (".qkvb_proj", ".k_proj", 1),
+            (".qkvb_proj", ".v_proj", 2),
+            (".qkvb_proj", ".b_proj", 3),
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
