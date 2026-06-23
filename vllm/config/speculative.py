@@ -44,6 +44,8 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "bailing_hybrid_mtp",
+    "bailing_hybrid_v3_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
@@ -386,6 +388,28 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
+            )
+
+        if hf_config.architectures[0] == "BailingMoeV2_5ForCausalLM":
+            hf_config.model_type = "bailing_hybrid_mtp"
+        if hf_config.model_type in ("bailing_hybrid", "bailing_hybrid_mtp"):
+            hf_config.model_type = "bailing_hybrid_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+        if hf_config.architectures[0] == "BailingMoeV3ForCausalLM":
+            hf_config.model_type = "bailing_hybrid_v3_mtp"
+        if hf_config.model_type == "bailing_hybrid_v3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV3MTPModel"],
+                }
             )
 
         if hf_config.model_type == "exaone_moe":

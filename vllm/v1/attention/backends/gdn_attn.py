@@ -213,6 +213,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            if query_start_loc_cpu[-1].item() > m.num_actual_tokens:
+                query_lens = query_start_loc[1:].clamp(
+                    max=m.num_actual_tokens
+                ) - query_start_loc[:-1].clamp(max=m.num_actual_tokens)
+                query_lens_cpu = query_start_loc_cpu[1:].clamp(
+                    max=m.num_actual_tokens
+                ) - query_start_loc_cpu[:-1].clamp(max=m.num_actual_tokens)
 
             # Use CPU tensors to avoid CPU-GPU sync
             non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
@@ -241,7 +248,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if num_prefills == 0 and num_decodes == 0:
                 spec_token_size = min(
                     num_spec_decodes * (self.num_spec + 1),
-                    query_start_loc_cpu[-1].item(),
+                    m.num_actual_tokens,
                 )
                 spec_token_indx = torch.arange(
                     spec_token_size,
@@ -266,7 +273,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
                     query_lens,
-                    output_size=query_start_loc_cpu[-1].item(),
+                    output_size=m.num_actual_tokens,
                 )
                 index = torch.argsort(spec_token_masks, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
@@ -353,9 +360,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Prepare tensors for cudagraph
-        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
-        batch_size = m.num_actual_tokens
+        # Prepare tensors for cudagraph.
+        # num_actual_tokens is a token count. Spec/non-spec decode metadata is
+        # indexed by request, so pad these persistent buffers to the graph
+        # request count instead.
+        graph_batch_size = m.num_reqs
 
         if (
             self.use_full_cuda_graph
@@ -368,13 +377,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
             )
-            spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+            spec_state_indices_tensor = self.spec_state_indices_tensor[:graph_batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
                 spec_sequence_masks[:num_spec_decodes], non_blocking=True
             )
-            spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+            spec_sequence_masks = self.spec_sequence_masks[:graph_batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
@@ -394,13 +403,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_query_start_loc, non_blocking=True
             )
             spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
-            spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+            spec_query_start_loc = self.spec_query_start_loc[: graph_batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
             self.num_accepted_tokens[:num_spec_decodes].copy_(
                 num_accepted_tokens, non_blocking=True
             )
-            num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+            num_accepted_tokens = self.num_accepted_tokens[:graph_batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
         if (
@@ -413,7 +422,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_state_indices_tensor, non_blocking=True
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
-                :batch_size
+                :graph_batch_size
             ]
             non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
 
@@ -421,7 +430,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc, non_blocking=True
             )
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+            non_spec_query_start_loc = self.non_spec_query_start_loc[
+                : graph_batch_size + 1
+            ]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(

@@ -308,11 +308,17 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return self.get_state_shape_with_num_spec(0)
+
+    def get_state_shape_with_num_spec(
+        self, num_spec: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
+            num_spec=num_spec,
         )
 
     def __init__(
@@ -806,6 +812,10 @@ class BailingMoeV3Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+    @property
+    def embed_tokens(self) -> nn.Module:
+        return self.word_embeddings
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)

@@ -15,7 +15,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig
+from vllm.config import CUDAGraphMode, SpeculativeConfig
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -189,3 +189,108 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+def test_gdn_spec_decode_full_graph_metadata_pads_by_request_count():
+    vllm_config = create_vllm_config(block_size=BLOCK_SIZE)
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        num_speculative_blocks=1,
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[20, 20, 0], query_lens=[2, 2, 0]),
+        BLOCK_SIZE,
+        DEVICE,
+        arange_block_indices=True,
+    )
+    common.block_table_tensor = torch.tensor(
+        [[10, 11], [12, 13], [0, 0]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([1, 2, 1], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([1, 1, -1], dtype=torch.int32),
+    )
+
+    assert meta.num_actual_tokens == 4
+    assert meta.num_spec_decodes == 2
+    assert meta.spec_state_indices_tensor is not None
+    assert meta.spec_state_indices_tensor.shape == (common.num_reqs, 2)
+    assert meta.spec_state_indices_tensor.tolist() == [[10, 11], [12, 13], [0, 0]]
+    assert meta.spec_sequence_masks is not None
+    assert meta.spec_sequence_masks.tolist() == [True, True, False]
+    assert meta.spec_query_start_loc is not None
+    assert meta.spec_query_start_loc.tolist() == [0, 2, 4, 4]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [1, 2, 1]
+
+
+def test_gdn_full_graph_ignores_token_padded_dummy_rows():
+    vllm_config = create_vllm_config(block_size=BLOCK_SIZE)
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        num_speculative_blocks=1,
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[20, 20, 0], query_lens=[2, 2, 2]),
+        BLOCK_SIZE,
+        DEVICE,
+        arange_block_indices=True,
+    ).replace(num_actual_tokens=4, slot_mapping=torch.arange(4, device=DEVICE))
+    common.block_table_tensor = torch.tensor(
+        [[10, 11], [12, 13], [0, 0]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([1, 2, 1], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([1, 1, -1], dtype=torch.int32),
+    )
+
+    assert meta.num_actual_tokens == 4
+    assert meta.num_prefills == 0
+    assert meta.num_prefill_tokens == 0
+    assert meta.num_decodes == 0
+    assert meta.num_spec_decodes == 2
+    assert meta.num_spec_decode_tokens == 4
+    assert meta.non_spec_token_indx is not None
+    assert meta.non_spec_token_indx.tolist() == []
+    assert meta.spec_token_indx is not None
+    assert meta.spec_token_indx.tolist() == [0, 1, 2, 3]

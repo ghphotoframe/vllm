@@ -44,24 +44,22 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     share_lm_head = True
     if hasattr(eagle_model, "has_own_lm_head"):
         share_lm_head = not eagle_model.has_own_lm_head
-    if share_lm_head and hasattr(target_model, "lm_head"):
-        if hasattr(eagle_model, "lm_head"):
-            del eagle_model.lm_head
-        eagle_model.lm_head = target_model.lm_head
+    target_lm_head = getattr(target_model, "lm_head", None)
+    if target_lm_head is None:
+        target_language_model = (
+            target_model.get_language_model()
+            if hasattr(target_model, "get_language_model")
+            else target_model
+        )
+        target_lm_head = getattr(target_language_model, "lm_head", None)
 
-        # MTP models call compute_logits via shared_head.head (a
-        # ParallelLMHead inside each MTP layer), not self.model.lm_head.
-        # If the checkpoint omits a copy of the lm_head weights at the
-        # MTP layer path, shared_head.head stays uninitialised and
-        # produces zero/NaN logits. Share it explicitly from the target.
-        inner = getattr(eagle_model, "model", None)
-        layers = getattr(inner, "layers", None) if inner is not None else None
-        if layers is not None:
-            items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
-            for layer in items:
-                sh = getattr(layer, "shared_head", None)
-                if sh is not None and hasattr(sh, "head"):
-                    del sh.head
-                    sh.head = target_model.lm_head
+    if share_lm_head and target_lm_head is not None:
+        share_lm_head_hook = getattr(eagle_model, "share_lm_head", None)
+        if callable(share_lm_head_hook):
+            share_lm_head_hook(target_lm_head)
+        else:
+            if hasattr(eagle_model, "lm_head"):
+                del eagle_model.lm_head
+            eagle_model.lm_head = target_lm_head
 
     return eagle_model
