@@ -124,7 +124,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -2243,7 +2242,6 @@ class GPUModelRunner(
                 (
                     Mamba2AttentionMetadataBuilder,
                     GDNAttentionMetadataBuilder,
-                    LinearAttentionMetadataBuilder,
                 ),
             ):
                 assert ubid is None, "UBatching not supported with spec decode metadata yet"

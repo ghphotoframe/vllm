@@ -236,7 +236,6 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
-            "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
         ):
             # check is deepseek_v4 model
@@ -516,7 +515,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
-    "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,

@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inference-only Bailing MoE v2.5 MTP model."""
+"""Shared MTP (Multi-Token Prediction) base classes for Bailing MoE models.
+
+This module provides the reusable MTP infrastructure (variant descriptor,
+predictor layers, weight loading) that is shared across Bailing MoE versions.
+Concrete MTP models (e.g. BailingMoeV3MTPModel) instantiate these by
+supplying a `BailingMTPVariant` that wires in version-specific attention,
+MLP, and expert-mapping logic.
+
+
+"""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -9,23 +18,18 @@ import torch
 import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.bailing_moe_linear import (
-    BailingMoeV25, BailingMoeV25MLAAttention)
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (PPMissingLayer,
-                                              is_pp_missing_parameter,
-                                              maybe_prefix)
+                                               is_pp_missing_parameter,
+                                               maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
 
@@ -397,41 +401,3 @@ class BailingMTPModelBase(nn.Module, SupportsPP):
                     "Use a checkpoint that includes MTP layer weights, or "
                     "disable speculative decoding.")
         return loaded_params
-
-
-def _make_bailing_v25_expert_mapping(
-        model: BailingMTPModelBase) -> list[tuple[str, str, int, str]]:
-    return fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=model.config.num_experts,
-        num_redundant_experts=0,
-    )
-
-
-_BAILING_V25_MTP_VARIANT = BailingMTPVariant(
-    error_name="Bailing",
-    attention_cls=BailingMoeV25MLAAttention,
-    mlp_cls=BailingMoeV25,
-    expert_mapping_fn=_make_bailing_v25_expert_mapping,
-    mask_zero_position=True,
-    normalize_attention_dense=True,
-)
-
-
-@support_torch_compile
-class BailingMoeV25MTPModel(BailingMTPModelBase):
-
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            variant=_BAILING_V25_MTP_VARIANT,
-        )
