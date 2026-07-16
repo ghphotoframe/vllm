@@ -95,6 +95,7 @@ def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
     input: torch.Tensor,
+    limit: float | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function."""
     assert input.dim() == 2, "Input must be 2D"
@@ -120,7 +121,10 @@ def apply_moe_activation(
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
-        swiglustep_and_mul_triton(output, input)
+        if limit is None:
+            swiglustep_and_mul_triton(output, input)
+        else:
+            swiglustep_and_mul_triton(output, input, float(limit))
 
     # Activations without gated multiplication
     elif activation == MoEActivation.SILU_NO_MUL:

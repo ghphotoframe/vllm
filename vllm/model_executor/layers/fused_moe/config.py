@@ -1253,6 +1253,9 @@ class FusedMoEConfig:
     # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
+    # Optional GEMM1 output clamp limit for SwiGLU variants.
+    gemm1_clamp_limit: float | None = None
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(

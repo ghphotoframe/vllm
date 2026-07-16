@@ -883,7 +883,9 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def activation(
         self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation, output, input, limit=self.moe_config.gemm1_clamp_limit
+        )
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
