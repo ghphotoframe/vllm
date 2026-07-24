@@ -215,6 +215,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
+    "BailingMoeV3ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Bailing-MoE-V3-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
@@ -1564,6 +1569,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "BailingMoeV25MTPModel": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T",
         speculative_model="inclusionAI/Ring-2.5-1T",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "BailingMoeV3MTPModel": _HfExamplesInfo(
+        "inclusionAI/Bailing-MoE-V3-Flash",
+        speculative_model="inclusionAI/Bailing-MoE-V3-Flash",
         trust_remote_code=True,
         is_available_online=False,
     ),

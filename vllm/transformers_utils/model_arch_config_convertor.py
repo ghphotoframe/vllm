@@ -272,6 +272,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
+            "bailing_hybrid_v3_mtp",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -545,6 +546,11 @@ class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class BailingHybridV3MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
 class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
@@ -640,6 +646,7 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
+    "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,

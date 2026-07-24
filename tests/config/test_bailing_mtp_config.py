@@ -6,6 +6,7 @@ from transformers import PretrainedConfig
 from vllm.config.speculative import MTPModelTypes, SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
     BailingHybridMTPModelArchConfigConvertor,
+    BailingHybridV3MTPModelArchConfigConvertor,
 )
 
 
@@ -48,5 +49,33 @@ def test_bailing_hybrid_mtp_model_arch_config():
 
     assert model_arch_config.model_type == "bailing_hybrid_mtp"
     assert model_arch_config.architectures == ["BailingMoeV25MTPModel"]
+    assert model_arch_config.total_num_hidden_layers == 1
+    assert model_arch_config.is_deepseek_mla
+
+
+def test_bailing_hybrid_v3_mtp_hf_config_override():
+    config = _bailing_config()
+    config.model_type = "bailing_hybrid_v3"
+    config.architectures = ["BailingMoeV3ForCausalLM"]
+
+    overridden = SpeculativeConfig.hf_config_override(config)
+
+    assert overridden.model_type == "bailing_hybrid_v3_mtp"
+    assert overridden.architectures == ["BailingMoeV3MTPModel"]
+    assert overridden.n_predict == 1
+    assert "bailing_hybrid_v3_mtp" in MTPModelTypes.__args__
+
+
+def test_bailing_hybrid_v3_mtp_model_arch_config():
+    config = _bailing_config()
+    config.model_type = "bailing_hybrid_v3_mtp"
+    config.architectures = ["BailingMoeV3MTPModel"]
+
+    model_arch_config = BailingHybridV3MTPModelArchConfigConvertor(
+        config, config
+    ).convert()
+
+    assert model_arch_config.model_type == "bailing_hybrid_v3_mtp"
+    assert model_arch_config.architectures == ["BailingMoeV3MTPModel"]
     assert model_arch_config.total_num_hidden_layers == 1
     assert model_arch_config.is_deepseek_mla

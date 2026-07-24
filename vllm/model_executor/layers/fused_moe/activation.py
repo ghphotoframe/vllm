@@ -155,7 +155,11 @@ def apply_moe_activation(
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
-        swiglustep_and_mul_triton(output, input)
+        swiglustep_and_mul_triton(
+            output,
+            input,
+            7.0 if clamp_limit is None else float(clamp_limit),
+        )
 
     # Activations without gated multiplication
     elif activation == MoEActivation.SILU_NO_MUL:
