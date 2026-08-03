@@ -25,7 +25,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.fla.ops.kda import (
@@ -148,6 +147,13 @@ def _load_a_log(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
 class _IdentityProjection(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
         return x, None
+
+
+# Model-specific extensions that OOT MLA wrappers may opt into.
+class _BailingMoeV3MLAModules(MLAModules):
+    custom_o_proj: nn.Module
+    g_proj: nn.Module | None
+    gated_attention_proj_granularity_type: str | None
 
 
 class BailingMoeV3MLP(nn.Module):
@@ -295,7 +301,7 @@ class BailingMoeV3MLAAttention(nn.Module):
             is_neox_style=False,
             rope_parameters=_build_rope_parameters(config),
         )
-        mla_modules = MLAModules(
+        mla_modules = _BailingMoeV3MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             rotary_emb=self.rotary_emb,
@@ -308,6 +314,14 @@ class BailingMoeV3MLAAttention(nn.Module):
             indexer=None,
             is_sparse=False,
             topk_indices_buffer=None,
+        )
+        # OOT backends may consume these model-specific extensions and keep
+        # gated output projection inside their MLA custom-op boundary. The
+        # in-tree wrapper ignores them and retains the fallback below.
+        mla_modules.custom_o_proj = self.dense
+        mla_modules.g_proj = self.g_proj
+        mla_modules.gated_attention_proj_granularity_type = (
+            self.gated_attention_proj_granularity_type
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
@@ -323,9 +337,15 @@ class BailingMoeV3MLAAttention(nn.Module):
             quant_config,
             prefix,
         )
+        self.mla_handles_gate_o_proj = bool(
+            getattr(self.mla_attn, "handles_gate_o_proj", False)
+        )
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
         attn_out = self.mla_attn(positions, hidden_states)
+        if self.mla_handles_gate_o_proj:
+            return attn_out
+
         if self.g_proj is not None:
             gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
                 hidden_states.dtype
