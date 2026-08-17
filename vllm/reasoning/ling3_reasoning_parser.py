@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning parser for InclusionAI Ling 3 models."""
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
@@ -30,6 +31,12 @@ class Ling3ReasoningParser(Qwen3ReasoningParser):
         )
         kwargs["chat_template_kwargs"] = chat_kwargs
         super().__init__(tokenizer, *args, **kwargs)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning tokens when ``<think>`` is in the prompt."""
+        if self.end_token_id in token_ids:
+            return token_ids.index(self.end_token_id) + 1
+        return len(token_ids) if self.thinking_enabled else 0
 
     def extract_reasoning(
         self,
