@@ -46,7 +46,4 @@ class Ling3ReasoningParser(Qwen3ReasoningParser):
         if not self.thinking_enabled:
             return None, model_output
 
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning and not content and "<tool_call>" not in model_output:
-            return None, reasoning
-        return reasoning, content
+        return super().extract_reasoning(model_output, request)

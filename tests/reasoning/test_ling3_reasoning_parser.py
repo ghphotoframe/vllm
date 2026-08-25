@@ -48,13 +48,13 @@ def test_ling3_can_disable_thinking():
     assert content == "<think>reason</think>answer"
 
 
-def test_ling3_open_reasoning_falls_back_to_content():
+def test_ling3_truncated_reasoning_stays_reasoning():
     parser = Ling3ReasoningParser(MockTokenizer())
 
-    reasoning, content = parser.extract_reasoning("<think>only reasoning", _request())
+    reasoning, content = parser.extract_reasoning("only reasoning", _request())
 
-    assert reasoning is None
-    assert content == "only reasoning"
+    assert reasoning == "only reasoning"
+    assert content is None
 
 
 def test_ling3_tool_call_implicitly_ends_reasoning():
