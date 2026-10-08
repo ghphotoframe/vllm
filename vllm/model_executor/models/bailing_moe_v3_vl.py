@@ -21,6 +21,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -60,7 +61,7 @@ from .qwen2_vl import (
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
-from .qwen3_vl import Qwen3_VisionTransformer
+from .qwen3_vl import Qwen3_VisionTransformer, pos_embed_interpolate_native
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -199,7 +200,7 @@ class BailingMoeV3VisionPatchMerger(nn.Module):
 
 
 class BailingMoeV3VisionTransformer(Qwen3_VisionTransformer):
-    """Qwen3 ViT with Bailing's parameter-free patch merger."""
+    """Qwen3 ViT with Bailing's optional parameter-free patch merger."""
 
     def __init__(
         self,
@@ -216,11 +217,12 @@ class BailingMoeV3VisionTransformer(Qwen3_VisionTransformer):
             quant_config = None
 
         vision_config = copy.deepcopy(vision_config)
-        vision_config.deepstack_visual_indexes = []
-        merged_hidden_size = (
-            vision_config.hidden_size * vision_config.spatial_merge_size**2
-        )
-        vision_config.out_hidden_size = merged_hidden_size
+        disable_merger_proj = getattr(vision_config, "disable_merger_proj", False)
+        if disable_merger_proj:
+            vision_config.deepstack_visual_indexes = []
+            vision_config.out_hidden_size = (
+                vision_config.hidden_size * vision_config.spatial_merge_size**2
+            )
 
         super().__init__(
             vision_config,
@@ -228,14 +230,43 @@ class BailingMoeV3VisionTransformer(Qwen3_VisionTransformer):
             quant_config=quant_config,
             prefix=prefix,
         )
-        self.merger = BailingMoeV3VisionPatchMerger(
-            context_dim=vision_config.hidden_size,
-            spatial_merge_size=vision_config.spatial_merge_size,
-            norm_eps=norm_eps,
+        if disable_merger_proj:
+            self.merger = BailingMoeV3VisionPatchMerger(
+                context_dim=vision_config.hidden_size,
+                spatial_merge_size=vision_config.spatial_merge_size,
+                norm_eps=norm_eps,
+            )
+
+        # HF computes vision frequencies and the rotary products in FP32,
+        # then casts the rotated Q/K back to the model dtype.
+        head_dim = vision_config.hidden_size // vision_config.num_heads
+        self.rotary_pos_emb = get_rope(
+            head_size=head_dim,
+            max_position=8192,
+            is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
+            dtype=torch.float32,
         )
-        self.deepstack_visual_indexes = []
-        self.deepstack_merger_list = nn.ModuleList()
-        self.out_hidden_size = merged_hidden_size
+        for block in self.blocks:
+            block.attn.apply_rotary_emb.enable_fp32_compute = True
+
+    def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+        # Preserve HF's coordinate calculation and model-dtype products. The
+        # inherited Triton path can fuse BF16 products with the following sums.
+        outputs = []
+        for t, h, w in grid_thw:
+            outputs.append(
+                pos_embed_interpolate_native(
+                    self.pos_embed.weight,
+                    t,
+                    h,
+                    w,
+                    self.num_grid_per_side,
+                    self.spatial_merge_size,
+                    self.dtype,
+                )
+            )
+        return torch.cat(outputs, dim=0)
 
 
 class BailingMoeV3VLProjector(nn.Module):
@@ -349,8 +380,10 @@ class BailingMoeV3VLForConditionalGeneration(
         self.config = config
         self.model_config = vllm_config.model_config
 
-        merged_vision_size = vision_config.hidden_size * (
-            vision_config.spatial_merge_size**2
+        self.vision_out_dim = (
+            vision_config.hidden_size * vision_config.spatial_merge_size**2
+            if getattr(vision_config, "disable_merger_proj", False)
+            else vision_config.out_hidden_size
         )
         with self._mark_tower_model(vllm_config, "image"):
             self.visual = BailingMoeV3VisionTransformer(
@@ -360,7 +393,7 @@ class BailingMoeV3VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.linear_proj = BailingMoeV3VLProjector(
-                vision_hidden_size=merged_vision_size,
+                vision_hidden_size=self.vision_out_dim,
                 text_hidden_size=text_config.hidden_size,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "linear_proj"),
@@ -411,7 +444,9 @@ class BailingMoeV3VLForConditionalGeneration(
                 pixel_values,
                 grid_thw=image_grid_thw,
             )
-            image_embeds = self.linear_proj(vision_features)
+            # Bailing consumes the main merger stream, even when the vision
+            # encoder also returns concatenated DeepStack features.
+            image_embeds = self.linear_proj(vision_features[..., : self.vision_out_dim])
 
         image_embeds = image_embeds.to(dtype=self.visual.dtype)
         merge_unit = self.visual.spatial_merge_size**2
@@ -450,6 +485,11 @@ class BailingMoeV3VLForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        """Use the centered spatial coordinates of the Bailing VL reference.
+
+        Text advances along T rather than the largest spatial coordinate.
+        Image features are already isolated per request by the processor.
+        """
         position_blocks: list[np.ndarray] = []
         consumed = 0
         merge_size = self.config.vision_config.spatial_merge_size
@@ -460,7 +500,7 @@ class BailingMoeV3VLForConditionalGeneration(
 
             offset = mm_feature.mm_position.offset
             text_len = offset - consumed
-            start = position_blocks[-1].max() + 1 if position_blocks else 0
+            start = position_blocks[-1][0].max() + 1 if position_blocks else 0
             position_blocks.append(
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + start
             )
@@ -470,12 +510,15 @@ class BailingMoeV3VLForConditionalGeneration(
             assert isinstance(image_grid_thw, torch.Tensor)
             t, h, w = image_grid_thw.tolist()
             assert t == 1, f"Image must have one temporal grid, got {t}"
-            grid = np.indices((t, h // merge_size, w // merge_size))
+            height, width = h // merge_size, w // merge_size
+            grid = np.indices((t, height, width))
+            grid[1] -= (height - 1) // 2
+            grid[2] -= (width - 1) // 2
             position_blocks.append(grid.reshape(3, -1) + text_len + start)
-            consumed = offset + t * (h // merge_size) * (w // merge_size)
+            consumed = offset + t * height * width
 
         if consumed < len(input_tokens):
-            start = position_blocks[-1].max() + 1 if position_blocks else 0
+            start = position_blocks[-1][0].max() + 1 if position_blocks else 0
             text_len = len(input_tokens) - consumed
             position_blocks.append(
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + start
@@ -486,7 +529,7 @@ class BailingMoeV3VLForConditionalGeneration(
             return torch.from_numpy(positions), 0
 
         positions = np.concatenate(position_blocks, axis=1).reshape(3, -1)
-        position_delta = int(positions.max() + 1 - len(input_tokens))
+        position_delta = int(positions[0].max() + 1 - len(input_tokens))
         return torch.from_numpy(positions), position_delta
 
     def forward(

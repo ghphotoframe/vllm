@@ -13,6 +13,15 @@ from vllm.model_executor.layers.rotary_embedding.bailing_mrope import (
     BailingMRotaryEmbedding,
 )
 from vllm.model_executor.models.bailing_moe_v3 import _build_mla_rotary_embedding
+from vllm.model_executor.models.bailing_moe_v3_vl import (
+    BailingMoeV3VLForConditionalGeneration,
+)
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 
 
@@ -174,3 +183,70 @@ def test_bailing_mrope_cuda_matches_native_for_strided_mla_views(
     if position_kind == "multimodal":
         assert actual_query.data_ptr() == query.data_ptr()
         assert actual_key.data_ptr() == key.data_ptr()
+
+
+def test_bailing_mrope_multi_image_positions_and_decode_delta():
+    """Center spatial axes and resume text after T, in prompt image order."""
+    model = object.__new__(BailingMoeV3VLForConditionalGeneration)
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2))
+
+    def image_feature(offset, length, grid):
+        return MultiModalFeatureSpec(
+            data=MultiModalKwargsItem(
+                {"image_grid_thw": MultiModalFieldElem(torch.tensor(grid), None)}
+            ),
+            modality="image",
+            identifier=str(offset),
+            mm_position=PlaceholderRange(offset=offset, length=length),
+        )
+
+    positions, delta = model.get_mrope_input_positions(
+        input_tokens=list(range(13)),
+        mm_features=[
+            image_feature(10, 1, [1, 2, 2]),
+            image_feature(2, 6, [1, 4, 6]),
+        ],
+    )
+    expected = torch.tensor(
+        [
+            [0, 1, 2, 2, 2, 2, 2, 2, 3, 4, 5, 6, 7],
+            [0, 1, 2, 2, 2, 3, 3, 3, 3, 4, 5, 6, 7],
+            [0, 1, 1, 2, 3, 1, 2, 3, 3, 4, 5, 6, 7],
+        ]
+    )
+    torch.testing.assert_close(positions, expected)
+    assert delta == -5
+
+
+@pytest.mark.parametrize("trailing_text", [0, 1, 4])
+def test_bailing_mrope_rectangular_image_matches_antmmf(trailing_text):
+    """A 10x7 merged grid must not push following text to the spatial max."""
+    model = object.__new__(BailingMoeV3VLForConditionalGeneration)
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2))
+    feature = MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {"image_grid_thw": MultiModalFieldElem(torch.tensor([1, 20, 14]), None)}
+        ),
+        modality="image",
+        identifier="rectangular",
+        mm_position=PlaceholderRange(offset=2, length=70),
+    )
+    positions, delta = model.get_mrope_input_positions(
+        list(range(72 + trailing_text)), [feature]
+    )
+    torch.testing.assert_close(positions[:, 2], torch.tensor([2, -2, -1]))
+    torch.testing.assert_close(positions[:, 71], torch.tensor([2, 7, 5]))
+    if trailing_text:
+        expected = torch.arange(3, 3 + trailing_text).expand(3, -1)
+        torch.testing.assert_close(positions[:, 72:], expected)
+    assert delta == -69
+    assert len(range(72 + trailing_text)) + delta == 3 + trailing_text
+
+
+@pytest.mark.parametrize("length", [0, 1, 17])
+def test_bailing_mrope_text_only_positions(length):
+    model = object.__new__(BailingMoeV3VLForConditionalGeneration)
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2))
+    positions, delta = model.get_mrope_input_positions(list(range(length)), [])
+    torch.testing.assert_close(positions, torch.arange(length).expand(3, -1))
+    assert delta == 0
