@@ -157,3 +157,27 @@ def test_bailing_v3_vl_config_rejects_invalid_values():
             },
             mrope_section=[8, 12, 12],
         )
+
+
+def test_bailing_router_weights_default_to_fp32():
+    config = BailingMoeV3VLConfig()
+    assert config.text_config.router_weight_dtype == "float32"
+    assert config.text_config.router_dtype == "fp32"
+
+
+def test_bailing_bf16_router_override_preserves_nested_config():
+    from vllm.config import ModelConfig
+
+    config = BailingMoeV3VLConfig(**_bailing_v3_vl_config())
+    original = config.to_dict()
+    text_config = config.text_config
+    model_config = object.__new__(ModelConfig)
+    model_config._apply_dict_overrides(
+        config, {"text_config": {"router_weight_dtype": "bfloat16"}}
+    )
+    assert config.text_config is text_config
+    assert text_config.router_weight_dtype == "bfloat16"
+    assert text_config.router_dtype == "fp32"
+    actual = config.to_dict()
+    actual["text_config"]["router_weight_dtype"] = "float32"
+    assert actual == original

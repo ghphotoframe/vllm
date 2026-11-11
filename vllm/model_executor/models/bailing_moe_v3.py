@@ -16,7 +16,6 @@ from typing import TypeGuard
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from transformers.configuration_utils import PretrainedConfig
 
@@ -34,6 +33,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1118,28 +1118,6 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             core_attn_out[0, :num_actual_tokens] = out[0, :num_actual_tokens]
 
 
-class BailingMoeV3Gate(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        params_dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        if params_dtype is None:
-            params_dtype = torch.float32
-        self.weight = nn.Parameter(
-            torch.empty((config.num_experts, config.hidden_size), dtype=params_dtype)
-        )
-        self.expert_bias = nn.Parameter(
-            torch.empty((config.num_experts,), dtype=torch.float32)
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden_states.to(self.weight.dtype), self.weight).to(
-            hidden_states.dtype
-        )
-
-
 class BailingMoeV3MoE(nn.Module):
     def __init__(
         self,
@@ -1153,7 +1131,27 @@ class BailingMoeV3MoE(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.hidden_size = config.hidden_size
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.gate = BailingMoeV3Gate(config)
+        # Keep legacy FP32 weights unless BF16-origin router weights are
+        # explicitly selected. GateLinear supplies the device's shared GEMM
+        # implementation while preserving FP32 router logits.
+        router_weight_dtype = getattr(config, "router_weight_dtype", "float32")
+        router_dtypes = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+        if router_weight_dtype not in router_dtypes:
+            raise ValueError(
+                "router_weight_dtype must be 'float32' or 'bfloat16', got "
+                f"{router_weight_dtype!r}"
+            )
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=config.num_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            params_dtype=router_dtypes[router_weight_dtype],
+            prefix=f"{prefix}.gate",
+        )
+        self.gate.expert_bias = nn.Parameter(
+            torch.empty((config.num_experts,), dtype=torch.float32)
+        )
         self.expert_swiglu_limit = _get_layer_swiglu_limit(
             getattr(config, "expert_swiglu_limit_list", None), layer_id
         )
@@ -1198,7 +1196,7 @@ class BailingMoeV3MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
-        router_logits = self.gate(hidden_states.to(torch.float32))
+        router_logits, _ = self.gate(hidden_states)
         hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )

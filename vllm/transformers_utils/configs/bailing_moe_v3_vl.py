@@ -113,6 +113,7 @@ class BailingMoeV3TextConfig(PretrainedConfig):
         seq_aux: bool = True,
         topk_method: str = "noaux_tc",
         router_dtype: str = "fp32",
+        router_weight_dtype: str = "float32",
         gated_attention_proj_granularity_type: str | None = None,
         no_kda_lora: bool = False,
         kda_safe_gate: bool = False,
@@ -187,6 +188,8 @@ class BailingMoeV3TextConfig(PretrainedConfig):
         self.seq_aux = seq_aux
         self.topk_method = topk_method
         self.router_dtype = router_dtype
+        # BF16 is opt-in for BF16-origin checkpoints; logits remain FP32.
+        self.router_weight_dtype = router_weight_dtype
         self.gated_attention_proj_granularity_type = (
             gated_attention_proj_granularity_type
         )
