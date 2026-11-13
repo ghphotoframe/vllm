@@ -84,6 +84,73 @@ def test_mtp_style_drafter_is_left_alone_under_pp(monkeypatch):
     assert draft_inner.embed_tokens is draft_embed
 
 
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (4, 0), (4, 1), (4, 2), (4, 3)])
+def test_bailing_mtp_last_pp_stage_loads_and_uses_own_embedding(
+    monkeypatch, pp_size, tp_size, tp_rank
+):
+    """A text MTP forward has no external embeddings on the last target stage."""
+    from vllm.model_executor.layers import vocab_parallel_embedding as vocab_module
+    from vllm.model_executor.models import bailing_moe_v3_mtp as mtp_module
+
+    config = SimpleNamespace(
+        vocab_size=128,
+        hidden_size=HIDDEN,
+        num_hidden_layers=72,
+        num_nextn_predict_layers=1,
+    )
+    pp_group = _fake_pp(pp_size)
+    monkeypatch.setattr(eagle_utils, "get_pp_group", pp_group)
+    # Also exercise the pre-fix constructor, which used this local import.
+    monkeypatch.setattr(mtp_module, "get_pp_group", pp_group, raising=False)
+    monkeypatch.setattr(vocab_module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        vocab_module, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    monkeypatch.setattr(
+        vocab_module, "tensor_model_parallel_all_reduce", lambda value: value
+    )
+    monkeypatch.setattr(mtp_module, "_get_draft_hf_config", lambda _: config)
+    monkeypatch.setattr(mtp_module, "LogitsProcessor", lambda _: nn.Identity())
+
+    class DraftLayer(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.marker = nn.Parameter(torch.zeros(1))
+
+        def forward(self, ids, positions, hidden, embeds, step):
+            return hidden + embeds
+
+    monkeypatch.setattr(mtp_module, "BailingMoeV3MultiTokenPredictorLayer", DraftLayer)
+    predictor = mtp_module.BailingMoeV3MultiTokenPredictor(vllm_config=None)
+    model = object.__new__(mtp_module.BailingMoeV3MTPModel)
+    nn.Module.__init__(model)
+    model.config, model.quant_config, model.model = config, None, predictor
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
+    weight = torch.arange(config.vocab_size * HIDDEN, dtype=torch.float32).reshape(
+        config.vocab_size, HIDDEN
+    )
+    loaded = model.load_weights(
+        [
+            ("model.word_embeddings.weight", weight),
+            ("model.layers.72.marker", torch.ones(1)),
+        ]
+    )
+    assert "model.embed_tokens.weight" in loaded
+    embedding = predictor.embed_tokens
+    start = tp_rank * (config.vocab_size // tp_size)
+    end = start + config.vocab_size // tp_size
+    torch.testing.assert_close(embedding.weight, weight[start:end])
+    target = _inner(PPMissingLayer() if pp_size > 1 else embedding)
+    eagle_utils.maybe_share_target_embed(model, predictor, target)
+    assert predictor.embed_tokens is embedding
+    ids = torch.tensor([start, end - 1])
+    hidden = torch.ones(2, HIDDEN)
+    for step in range(3):
+        output = predictor(ids, torch.tensor([0, 1]), hidden, spec_step_idx=step)
+        torch.testing.assert_close(output, hidden + weight[ids])
+
+
 @pytest.mark.parametrize(
     "method,pp_size,is_last_rank,expected",
     [

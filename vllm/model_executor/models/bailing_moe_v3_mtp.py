@@ -10,7 +10,6 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -39,7 +38,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    PPMissingLayer,
     _merge_multimodal_embeddings,
     is_pp_missing_parameter,
     maybe_prefix,
@@ -174,15 +172,13 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
+        # The drafter runs on the last target PP stage and embeds its own tokens.
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
